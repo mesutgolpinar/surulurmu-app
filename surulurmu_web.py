@@ -1,78 +1,105 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import cv2
-import numpy as np
-from pyzbar import pyzbar
 import requests
+from pyzbar import pyzbar
+import numpy as np
 
-# --- GÜÇLENDİRİLMİŞ BAĞLANTI AYARLARI ---
-RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-)
+# --- 1. AYARLAR VE SÖZLÜK ---
+RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-class BarcodeProcessor(VideoProcessorBase):
+KOZMETIK_SOZLUK = {
+    "PARABEN": "Koruyucu: Hormonal sistemi etkileyebilir.",
+    "SULFATE": "Sülfat: Cildi tahriş edebilir.",
+    "SILICONE": "Silikon: Gözenekleri tıkayabilir.",
+    "FRAGRANCE": "Sentetik Parfüm: Alerji riski taşır.",
+    "ALCOHOL DENAT": "Kurutucu Alkol: Cilt bariyerine zarar verebilir."
+}
+
+# --- 2. ÜRÜN SORGULAMA FONKSİYONU (TAM VERİ ÇEKER) ---
+def get_product_details(barcode):
+    if not barcode: return
+    
+    # Hem kozmetik hem genel veritabanını dene
+    urls = [
+        f"https://world.openbeautyfacts.org/api/v0/product/{barcode}.json",
+        f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
+    ]
+    
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200 and r.json().get("status") == 1:
+                p = r.json()["product"]
+                
+                # Bilgileri Ayıkla
+                marka = p.get('brands', 'Belirtilmemiş')
+                isim = p.get('product_name_tr') or p.get('product_name') or 'İsimsiz Ürün'
+                icerik = p.get('ingredients_text_tr') or p.get('ingredients_text') or ''
+                
+                st.success(f"📦 **Marka:** {marka} \n\n ✨ **Ürün:** {isim}")
+                
+                # Analiz Yap
+                st.subheader("🧪 İçerik Analizi")
+                found_any = False
+                if icerik:
+                    for ing, desc in KOZMETIK_SOZLUK.items():
+                        if ing in icerik.upper():
+                            st.error(f"⚠️ **{ing}:** {desc}")
+                            found_any = True
+                    
+                    if not found_any:
+                        st.balloons()
+                        st.success("Bilinen bir riskli maddeye rastlanmadı.")
+                    
+                    with st.expander("Ham İçerik Listesini Gör"):
+                        st.write(icerik)
+                else:
+                    st.warning("Ürünün içerik bilgisi veritabanında eksik.")
+                return True
+        except:
+            continue
+    st.warning("Ürün bulunamadı veya barkod hatalı.")
+    return False
+
+# --- 3. KAMERA İŞLEMCİSİ (KESKİN OKUMA MODU) ---
+class BarcodeScanner(VideoProcessorBase):
     def __init__(self):
-        self.barcode_data = None
+        self.last_barcode = None
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
-        # --- BARKOD YAKALAMA HASSASİYETİ ARTIRMA ---
-        # Görüntüyü gri tonlamaya çevir ve kontrastı artır (Kameranın daha iyi görmesi için)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Pyzbar ile tara
-        barcodes = pyzbar.decode(gray)
+        # Görüntü net olsa bile barkodu ayırt etmek için kontrastı artırıyoruz
+        # Bu işlem barkod çizgilerini jilet gibi keskinleştirir
+        sharp = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         
+        barcodes = pyzbar.decode(sharp)
         for barcode in barcodes:
-            self.barcode_data = barcode.data.decode("utf-8")
-            (x, y, w, h) = barcode.rect
-            # Barkodu bulduğunda ekrana yeşil çerçeve çiz (Geri bildirim için)
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 4)
-            
+            self.last_barcode = barcode.data.decode("utf-8")
         return frame
 
-st.set_page_config(page_title="SürülürMü? Denetçi", layout="centered")
+st.set_page_config(page_title="SürülürMü? v2.6", layout="centered")
 st.title("💄 SürülürMü? Profesyonel Denetçi")
 
-# --- 1. MANUEL GİRİŞ ALANI (HER ZAMAN GÖRÜNÜR) ---
-st.subheader("⌨️ Manuel Barkod Girişi")
-manual_input = st.text_input("Barkodu buraya yazın veya okutun:", key="manual_entry")
+# --- 4. ARAYÜZ ---
+tab1, tab2 = st.tabs(["⌨️ Elle Barkod", "📷 Canlı Tarayıcı"])
 
-# --- 2. CANLI KAMERA ALANI ---
-st.subheader("📷 Canlı Barkod Tarayıcı")
-st.info("İpucu: Barkodu kameraya yaklaştırın ve odaklanmasını bekleyin.")
+with tab1:
+    barcode_input = st.text_input("Barkod numarasını yazın:", key="manual")
+    if barcode_input:
+        get_product_details(barcode_input)
 
-ctx = webrtc_streamer(
-    key="barcode-v25",
-    video_processor_factory=BarcodeProcessor,
-    rtc_configuration=RTC_CONFIG,
-    media_stream_constraints={
-        "video": {"facingMode": "environment"}, # Arka kamerayı zorla
-        "audio": False
-    },
-    async_processing=True,
-)
-
-# --- ANALİZ MANTIĞI (HER İKİ GİRİŞ İÇİN DE ÇALIŞIR) ---
-final_barcode = None
-
-# Eğer kamera bir şey yakaladıysa onu kullan
-if ctx.video_processor and ctx.video_processor.barcode_data:
-    final_barcode = ctx.video_processor.barcode_data
-    st.success(f"🎯 Kamera Barkodu Yakaladı: {final_barcode}")
-# Eğer manuel giriş yapıldıysa onu kullan
-elif manual_input:
-    final_barcode = manual_input
-
-if final_barcode:
-    with st.spinner('Ürün veritabanında aranıyor...'):
-        # Buraya önceki mesajlardaki API sorgu kodlarını (Open Beauty Facts) ekleyebilirsin.
-        url = f"https://world.openbeautyfacts.org/api/v0/product/{final_barcode}.json"
-        r = requests.get(url)
-        if r.status_code == 200 and r.json().get("status") == 1:
-            p = r.json()["product"]
-            st.write(f"### ✨ Ürün: {p.get('product_name', 'Bilinmeyen')}")
-            # Analiz sonuçlarını buraya yazdırıyoruz...
-        else:
-            st.warning("Ürün bulunamadı. Lütfen barkodu kontrol edin.")
+with tab2:
+    ctx = webrtc_streamer(
+        key="live-scan",
+        video_processor_factory=BarcodeScanner,
+        rtc_configuration=RTC_CONFIG,
+        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False},
+        async_processing=True
+    )
+    
+    if ctx.video_processor and ctx.video_processor.last_barcode:
+        st.info(f"🎯 Kamera Barkodu Yakaladı: {ctx.video_processor.last_barcode}")
+        get_product_details(ctx.video_processor.last_barcode)
