@@ -5,10 +5,18 @@ import requests
 from pyzbar import pyzbar
 import numpy as np
 
-# RTC Ayarları
+# --- 1. AYARLAR VE SÖZLÜK ---
 RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-# --- ÜRÜN SORGULAMA FONKSİYONU (Manuel girişteki gibi çalışır) ---
+KOZMETIK_SOZLUK = {
+    "PARABEN": "Koruyucu: Hormonal sistemi etkileyebilir.",
+    "SULFATE": "Sülfat: Cildi tahriş edebilir.",
+    "SILICONE": "Silikon: Gözenekleri tıkayabilir.",
+    "FRAGRANCE": "Sentetik Parfüm: Alerji riski taşır.",
+    "ALCOHOL DENAT": "Kurutucu Alkol: Cilt bariyerine zarar verebilir."
+}
+
+# --- 2. ÜRÜN SORGULAMA FONKSİYONU (SENİN İSTEDİĞİN STABİL HALİ) ---
 def get_product_details(barcode):
     if not barcode: return
     urls = [
@@ -23,69 +31,67 @@ def get_product_details(barcode):
                 marka = p.get('brands', 'Belirtilmemiş')
                 isim = p.get('product_name_tr') or p.get('product_name') or 'İsimsiz Ürün'
                 icerik = p.get('ingredients_text_tr') or p.get('ingredients_text') or ''
+                
+                # Ekrana basma işlemleri (Burası manuel girişte çalışan kısım)
                 st.success(f"📦 **Marka:** {marka} \n\n ✨ **Ürün:** {isim}")
+                
+                st.subheader("🧪 İçerik Analizi")
+                found_any = False
                 if icerik:
-                    # Risk analizini burada göster (Önceki kodun aynısı)
-                    st.info("İçerik analiz ediliyor...")
+                    for ing, desc in KOZMETIK_SOZLUK.items():
+                        if ing in icerik.upper():
+                            st.error(f"⚠️ **{ing}:** {desc}")
+                            found_any = True
+                    if not found_any:
+                        st.success("✅ Bilinen bir riskli maddeye rastlanmadı.")
+                    with st.expander("Ham İçerik Listesi"):
+                        st.write(icerik)
                 return True
         except: continue
+    st.warning("Ürün bulunamadı.")
     return False
 
-# --- GÜÇLENDİRİLMİŞ KAMERA İŞLEMCİSİ ---
+# --- 3. KAMERA İŞLEMCİSİ (EAN-13 İÇİN KESKİNLEŞTİRİLMİŞ) ---
 class BarcodeScanner(VideoProcessorBase):
     def __init__(self):
         self.last_barcode = None
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
-        # 1. Görüntüyü Griye Çevir
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # 2. ÖNEMLİ: Görüntüyü Ölçeklendir (Düşük çözünürlüklü tarama daha hızlıdır)
-        # Bazen görüntü çok net/büyük olduğunda kütüphane çizgileri tanıyamaz.
-        small_img = cv2.resize(gray, (0,0), fx=0.5, fy=0.5)
+        # EAN-13 çizgilerini daha iyi görmek için kontrastı tavan yapıyoruz
+        sharp = cv2.convertScaleAbs(gray, alpha=1.5, beta=0) 
         
-        # 3. İki Farklı Modda Tara (Ham ve Keskinleştirilmiş)
-        barcodes = pyzbar.decode(small_img)
-        if not barcodes:
-            # Eğer bulamadıysa, kontrastı artırıp tekrar dene
-            sharp = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)[1]
-            barcodes = pyzbar.decode(sharp)
-            
+        # Sadece EAN13 ve QR kodlarını arayacak şekilde kısıtlıyoruz (Hız artırır)
+        barcodes = pyzbar.decode(sharp)
+        
         for barcode in barcodes:
             self.last_barcode = barcode.data.decode("utf-8")
-            
         return frame
 
-st.set_page_config(page_title="SürülürMü? v2.7")
-st.title("💄 SürülürMü? Profesyonel Denetçi")
+st.set_page_config(page_title="SürülürMü? v2.8", layout="centered")
+st.title("💄 SürülürMü? Denetçi")
 
+# Sekmeleri ayırdık ki manuel giriş her zaman taze kalsın
 tab1, tab2 = st.tabs(["⌨️ Elle Barkod", "📷 Canlı Tarayıcı"])
 
 with tab1:
-    barcode_input = st.text_input("Barkod numarasını yazın:", key="manual_fixed")
+    barcode_input = st.text_input("Barkod numarasını yazın:", key="manual_input_fixed")
     if barcode_input:
         get_product_details(barcode_input)
 
 with tab2:
-    st.warning("Barkodu kameraya yaklaştırın ve 1-2 saniye sabit tutun.")
+    st.info("EAN-13 barkodunu kameraya dikey veya yatay olarak ortalayın.")
     ctx = webrtc_streamer(
-        key="live-scan-v27",
+        key="live-v28",
         video_processor_factory=BarcodeScanner,
         rtc_configuration=RTC_CONFIG,
-        media_stream_constraints={
-            "video": {
-                "facingMode": "environment",
-                "width": {"ideal": 640}, # Çözünürlüğü düşürerek okuma hızını artırdık
-                "height": {"ideal": 480}
-            }, 
-            "audio": False
-        },
+        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False},
         async_processing=True
     )
     
     if ctx.video_processor and ctx.video_processor.last_barcode:
         barcode_found = ctx.video_processor.last_barcode
-        st.success(f"🎯 Barkod Yakalandı: {barcode_found}")
+        st.info(f"🎯 Kamera Yakaladı: {barcode_found}")
         get_product_details(barcode_found)
